@@ -1,0 +1,22 @@
+# 环境密钥，禁止上传
+.env
+
+# python缓存
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# 对话历史记录
+chat_history.json
+
+# 虚拟环境文件夹
+venv/
+env/
+
+# IDE配置
+.vscode/
+.idea/
+
+# 日志
+*.log
