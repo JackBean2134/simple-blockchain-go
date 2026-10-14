@@ -18,11 +18,8 @@ import (
 	"os"
 	"time"
 
-	"golang.org/x/crypto/ripemd160"
-)
-
-import (
 	"go.etcd.io/bbolt"
+	"golang.org/x/crypto/ripemd160"
 )
 
 const (
@@ -30,16 +27,17 @@ const (
 	maxNonce           = math.MaxInt64
 	dbFile             = "blockchain.db"
 	blocksBucket       = "blocks"
+	utxoBucket         = "utxo" // 新增UTXO缓存bucket
 	subsidy            = 10
 	version            = byte(0x00)
 	addressChecksumLen = 4
 	walletFile         = "wallets.dat"
 )
 
-// Wallet 钱包：一对公私钥
+// Wallet 钱包：不再直接存ecdsa.PrivateKey，存储密钥原始大数
 type Wallet struct {
-	PrivateKey ecdsa.PrivateKey
-	PublicKey  []byte
+	D    *big.Int // 私钥
+	X, Y *big.Int // 公钥坐标
 }
 
 // Wallets 钱包集合，持久化到文件
@@ -49,25 +47,39 @@ type Wallets struct {
 
 // NewWallet 创建新钱包，生成ECDSA密钥对
 func NewWallet() *Wallet {
-	private, public := newKeyPair()
-	wallet := Wallet{private, public}
-	return &wallet
-}
-
-// newKeyPair 生成椭圆曲线密钥对
-func newKeyPair() (ecdsa.PrivateKey, []byte) {
-	curve := elliptic.P256()
-	private, err := ecdsa.GenerateKey(curve, rand.Reader)
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		log.Panic(err)
 	}
-	pubKey := append(private.PublicKey.X.Bytes(), private.PublicKey.Y.Bytes()...)
-	return *private, pubKey
+
+	return &Wallet{
+		D: priv.D,
+		X: priv.PublicKey.X,
+		Y: priv.PublicKey.Y,
+	}
+}
+
+// GetPrivateKey 还原ecdsa私钥对象
+func (w *Wallet) GetPrivateKey() *ecdsa.PrivateKey {
+	return &ecdsa.PrivateKey{
+		PublicKey: ecdsa.PublicKey{
+			Curve: elliptic.P256(),
+			X:     w.X,
+			Y:     w.Y,
+		},
+		D: w.D,
+	}
+}
+
+// GetPublicKey 把公钥转为[]byte
+func (w *Wallet) GetPublicKey() []byte {
+	pub := w.GetPrivateKey().PublicKey
+	return elliptic.Marshal(pub.Curve, pub.X, pub.Y)
 }
 
 // GetAddress 由公钥生成Base58比特币地址
-func (w Wallet) GetAddress() []byte {
-	pubKeyHash := HashPubKey(w.PublicKey)
+func (w *Wallet) GetAddress() []byte {
+	pubKeyHash := HashPubKey(w.GetPublicKey())
 
 	versionedPayload := append([]byte{version}, pubKeyHash...)
 	checksum := checksum(versionedPayload)
@@ -158,21 +170,26 @@ func Base58Decode(input []byte) []byte {
 
 // LoadWallets 从文件加载钱包集合
 func LoadWallets() (*Wallets, error) {
-	wallets := Wallets{}
-	wallets.Wallets = make(map[string]*Wallet)
+	ws := Wallets{
+		Wallets: make(map[string]*Wallet),
+	}
 
-	file, err := os.OpenFile(walletFile, os.O_RDONLY|os.O_CREATE, 0600)
+	if _, err := os.Stat(walletFile); os.IsNotExist(err) {
+		return &ws, nil
+	}
+
+	file, err := os.Open(walletFile)
 	if err != nil {
 		return nil, err
 	}
 	defer file.Close()
 
 	decoder := gob.NewDecoder(file)
-	err = decoder.Decode(&wallets)
+	err = decoder.Decode(&ws)
 	if err != nil {
 		return nil, err
 	}
-	return &wallets, nil
+	return &ws, nil
 }
 
 // SaveWallets 保存钱包集合到文件
@@ -198,9 +215,13 @@ func (ws *Wallets) CreateWallet() string {
 	return address
 }
 
-// GetWallet 获取指定地址对应的钱包
-func (ws Wallets) GetWallet(address string) Wallet {
-	return *ws.Wallets[address]
+// GetWallet 获取指定地址对应的钱包，返回指针，找不到返回nil
+func (ws *Wallets) GetWallet(address string) *Wallet {
+	wallet, exists := ws.Wallets[address]
+	if !exists {
+		return nil
+	}
+	return wallet
 }
 
 // TXInput 交易输入：Signature签名，PubKey原始公钥
@@ -217,7 +238,7 @@ func (in *TXInput) UsesKey(pubKeyHash []byte) bool {
 	return bytes.Compare(lockingHash, pubKeyHash) == 0
 }
 
-// TXOutput 交易输出：金额 + 公钥哈希（替代ScriptPubKey）
+// TXOutput 交易输出：金额 + 公钥哈希
 type TXOutput struct {
 	Value      int
 	PubKeyHash []byte
@@ -233,6 +254,33 @@ func (out *TXOutput) Lock(address []byte) {
 // IsLockedWithKey 判断输出是否由指定公钥哈希锁定
 func (out *TXOutput) IsLockedWithKey(pubKeyHash []byte) bool {
 	return bytes.Compare(out.PubKeyHash, pubKeyHash) == 0
+}
+
+// TXOutputs 用于序列化多个TXOutput，存入bbolt UTXO bucket
+type TXOutputs struct {
+	Outputs []TXOutput
+}
+
+// Serialize 序列化TXOutputs
+func (outs TXOutputs) Serialize() []byte {
+	var buff bytes.Buffer
+	enc := gob.NewEncoder(&buff)
+	err := enc.Encode(outs)
+	if err != nil {
+		log.Panic(err)
+	}
+	return buff.Bytes()
+}
+
+// DeserializeOutputs 反序列化TXOutputs
+func DeserializeOutputs(data []byte) TXOutputs {
+	var outs TXOutputs
+	dec := gob.NewDecoder(bytes.NewReader(data))
+	err := dec.Decode(&outs)
+	if err != nil {
+		log.Panic(err)
+	}
+	return outs
 }
 
 // Transaction 交易
@@ -354,7 +402,7 @@ func NewCoinbaseTX(to, data string) *Transaction {
 }
 
 // NewUTXOTransaction 创建普通转账交易，自动收集UTXO、签名
-func NewUTXOTransaction(from, to string, amount int, bc *Blockchain) *Transaction {
+func NewUTXOTransaction(from, to string, amount int, utxoSet *UTXOSet) *Transaction {
 	var inputs []TXInput
 	var outputs []TXOutput
 
@@ -363,8 +411,12 @@ func NewUTXOTransaction(from, to string, amount int, bc *Blockchain) *Transactio
 		log.Panic(err)
 	}
 	wallet := wallets.GetWallet(from)
+	if wallet == nil {
+		log.Panicf("ERROR: 转出地址 %s 不存在", from)
+	}
+	pubKeyHash := HashPubKey(wallet.GetPublicKey())
 
-	acc, validOutputs := bc.FindSpendableOutputs(from, amount)
+	acc, validOutputs := utxoSet.FindSpendableOutputs(pubKeyHash, amount)
 	if acc < amount {
 		log.Panic("ERROR: Not enough funds")
 	}
@@ -376,7 +428,7 @@ func NewUTXOTransaction(from, to string, amount int, bc *Blockchain) *Transactio
 			log.Panic(err)
 		}
 		for _, out := range outs {
-			input := TXInput{txID, out, nil, wallet.PublicKey}
+			input := TXInput{txID, out, nil, wallet.GetPublicKey()}
 			inputs = append(inputs, input)
 		}
 	}
@@ -393,8 +445,54 @@ func NewUTXOTransaction(from, to string, amount int, bc *Blockchain) *Transactio
 
 	tx := Transaction{nil, inputs, outputs}
 	tx.ID = tx.Hash()
-	bc.SignTransaction(&tx, wallet.PrivateKey)
+	utxoSet.Blockchain.SignTransaction(&tx, *wallet.GetPrivateKey())
 	return &tx
+}
+
+// Merkle 树相关新增
+type MerkleTree struct {
+	RootNode *MerkleNode
+}
+type MerkleNode struct {
+	Left  *MerkleNode
+	Right *MerkleNode
+	Data  []byte
+}
+
+func NewMerkleNode(left, right *MerkleNode, data []byte) *MerkleNode {
+	mNode := MerkleNode{}
+	if left == nil && right == nil {
+		hash := sha256.Sum256(data)
+		mNode.Data = hash[:]
+	} else {
+		prevHashes := append(left.Data, right.Data...)
+		hash := sha256.Sum256(prevHashes)
+		mNode.Data = hash[:]
+	}
+	mNode.Left = left
+	mNode.Right = right
+	return &mNode
+}
+
+func NewMerkleTree(data [][]byte) *MerkleTree {
+	var nodes []MerkleNode
+	if len(data)%2 != 0 {
+		data = append(data, data[len(data)-1])
+	}
+	for _, datum := range data {
+		node := NewMerkleNode(nil, nil, datum)
+		nodes = append(nodes, *node)
+	}
+	for i := 0; i < len(nodes)/2; i++ {
+		var newLevel []MerkleNode
+		for j := 0; j < len(nodes); j += 2 {
+			node := NewMerkleNode(&nodes[j], &nodes[j+1], nil)
+			newLevel = append(newLevel, *node)
+		}
+		nodes = newLevel
+	}
+	mTree := MerkleTree{&nodes[0]}
+	return &mTree
 }
 
 // Block 区块
@@ -406,16 +504,14 @@ type Block struct {
 	Nonce         int
 }
 
-// HashTransactions 计算区块内所有交易的哈希
+// HashTransactions 修改：使用Merkle树根哈希
 func (b *Block) HashTransactions() []byte {
-	var txHashes [][]byte
-	var txHash [32]byte
-
+	var txData [][]byte
 	for _, tx := range b.Transactions {
-		txHashes = append(txHashes, tx.ID)
+		txData = append(txData, tx.Serialize())
 	}
-	txHash = sha256.Sum256(bytes.Join(txHashes, []byte{}))
-	return txHash[:]
+	tree := NewMerkleTree(txData)
+	return tree.RootNode.Data
 }
 
 // NewBlock 创建新区块
@@ -527,6 +623,128 @@ type Blockchain struct {
 	db  *bbolt.DB
 }
 
+// UTXOSet UTXO缓存集合
+type UTXOSet struct {
+	Blockchain *Blockchain
+}
+
+func (u UTXOSet) Reindex() {
+	db := u.Blockchain.db
+	bucketName := []byte(utxoBucket)
+
+	err := db.Update(func(tx *bbolt.Tx) error {
+		_ = tx.DeleteBucket(bucketName)
+		_, err := tx.CreateBucket(bucketName)
+		return err
+	})
+	if err != nil {
+		log.Panic(err)
+	}
+
+	UTXO := u.Blockchain.FindUTXOAll()
+
+	err = db.Update(func(tx *bbolt.Tx) error {
+		b := tx.Bucket(bucketName)
+		for txID, outs := range UTXO {
+			key, err := hex.DecodeString(txID)
+			if err != nil {
+				log.Panic(err)
+			}
+			err = b.Put(key, outs.Serialize())
+			if err != nil {
+				log.Panic(err)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		log.Panic(err)
+	}
+}
+
+func (u UTXOSet) FindSpendableOutputs(pubkeyHash []byte, amount int) (int, map[string][]int) {
+	unspentOutputs := make(map[string][]int)
+	accumulated := 0
+	db := u.Blockchain.db
+
+	err := db.View(func(tx *bbolt.Tx) error {
+		b := tx.Bucket([]byte(utxoBucket))
+		c := b.Cursor()
+		for k, v := c.First(); k != nil; k, v = c.Next() {
+			txID := hex.EncodeToString(k)
+			outs := DeserializeOutputs(v)
+			for outIdx, out := range outs.Outputs {
+				if out.IsLockedWithKey(pubkeyHash) && accumulated < amount {
+					accumulated += out.Value
+					unspentOutputs[txID] = append(unspentOutputs[txID], outIdx)
+				}
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		log.Panic(err)
+	}
+	return accumulated, unspentOutputs
+}
+
+func (u UTXOSet) FindUTXO(pubKeyHash []byte) []TXOutput {
+	var UTXOs []TXOutput
+	db := u.Blockchain.db
+	err := db.View(func(tx *bbolt.Tx) error {
+		b := tx.Bucket([]byte(utxoBucket))
+		c := b.Cursor()
+		for k, v := c.First(); k != nil; k, v = c.Next() {
+			outs := DeserializeOutputs(v)
+			for _, out := range outs.Outputs {
+				if out.IsLockedWithKey(pubKeyHash) {
+					UTXOs = append(UTXOs, out)
+				}
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		log.Panic(err)
+	}
+	return UTXOs
+}
+
+func (u UTXOSet) Update(block *Block) {
+	db := u.Blockchain.db
+	err := db.Update(func(tx *bbolt.Tx) error {
+		b := tx.Bucket([]byte(utxoBucket))
+		for _, tx := range block.Transactions {
+			if !tx.IsCoinbase() {
+				for _, vin := range tx.Vin {
+					outsBytes := b.Get(vin.Txid)
+					outs := DeserializeOutputs(outsBytes)
+					updatedOuts := TXOutputs{}
+					for outIdx, out := range outs.Outputs {
+						if outIdx != vin.Vout {
+							updatedOuts.Outputs = append(updatedOuts.Outputs, out)
+						}
+					}
+					if len(updatedOuts.Outputs) == 0 {
+						_ = b.Delete(vin.Txid)
+					} else {
+						_ = b.Put(vin.Txid, updatedOuts.Serialize())
+					}
+				}
+			}
+			newOutputs := TXOutputs{}
+			for _, out := range tx.Vout {
+				newOutputs.Outputs = append(newOutputs.Outputs, out)
+			}
+			_ = b.Put(tx.ID, newOutputs.Serialize())
+		}
+		return nil
+	})
+	if err != nil {
+		log.Panic(err)
+	}
+}
+
 // BlockchainIterator 迭代器，从链尾向前遍历区块
 type BlockchainIterator struct {
 	currentHash []byte
@@ -602,7 +820,7 @@ func BlockchainInstance() *Blockchain {
 }
 
 // MineBlock 挖矿打包交易，写入数据库，打包前校验所有交易签名
-func (bc *Blockchain) MineBlock(transactions []*Transaction) {
+func (bc *Blockchain) MineBlock(transactions []*Transaction) *Block {
 	var lastHash []byte
 	for _, tx := range transactions {
 		if bc.VerifyTransaction(tx) != true {
@@ -633,10 +851,11 @@ func (bc *Blockchain) MineBlock(transactions []*Transaction) {
 	if err != nil {
 		log.Panic(err)
 	}
+	return newBlock
 }
 
 // FindUnspentTransactions 遍历链，查找地址所有未花费交易
-func (bc *Blockchain) FindUnspentTransactions(address string) []Transaction {
+func (bc *Blockchain) FindUnspentTransactions(pubKeyHash []byte) []Transaction {
 	var unspentTXs []Transaction
 	spentTXOs := make(map[string][]int)
 	bci := bc.Iterator()
@@ -655,16 +874,13 @@ func (bc *Blockchain) FindUnspentTransactions(address string) []Transaction {
 						}
 					}
 				}
-				wallets, _ := LoadWallets()
-				wallet := wallets.GetWallet(address)
-				pubKeyHash := HashPubKey(wallet.PublicKey)
 				if out.IsLockedWithKey(pubKeyHash) {
 					unspentTXs = append(unspentTXs, *tx)
 				}
 			}
 			if tx.IsCoinbase() == false {
 				for _, in := range tx.Vin {
-					if in.UsesKey(HashPubKey(wallet.PublicKey)) {
+					if in.UsesKey(pubKeyHash) {
 						inTxID := hex.EncodeToString(in.Txid)
 						spentTXOs[inTxID] = append(spentTXOs[inTxID], in.Vout)
 					}
@@ -678,39 +894,49 @@ func (bc *Blockchain) FindUnspentTransactions(address string) []Transaction {
 	return unspentTXs
 }
 
-// FindSpendableOutputs 收集足够金额的UTXO用于转账
-func (bc *Blockchain) FindSpendableOutputs(address string, amount int) (int, map[string][]int) {
-	unspentOutputs := make(map[string][]int)
-	unspentTXs := bc.FindUnspentTransactions(address)
-	accumulated := 0
+// FindUTXOAll 返回 map[txID][]TXOutput，给UTXOSet.Reindex使用
+func (bc *Blockchain) FindUTXOAll() map[string]TXOutputs {
+	UTXO := make(map[string]TXOutputs)
+	spentTXOs := make(map[string][]int)
+	bci := bc.Iterator()
 
-Work:
-	for _, tx := range unspentTXs {
-		txID := hex.EncodeToString(tx.ID)
-		for outIdx, out := range tx.Vout {
-			wallets, _ := LoadWallets()
-			wallet := wallets.GetWallet(address)
-			pubKeyHash := HashPubKey(wallet.PublicKey)
-			if out.IsLockedWithKey(pubKeyHash) && accumulated < amount {
-				accumulated += out.Value
-				unspentOutputs[txID] = append(unspentOutputs[txID], outIdx)
-				if accumulated >= amount {
-					break Work
+	for {
+		block := bci.Next()
+		for _, tx := range block.Transactions {
+			txID := hex.EncodeToString(tx.ID)
+			var outputs TXOutputs
+
+		Outputs:
+			for outIdx, out := range tx.Vout {
+				// 如果这个输出已经被花费，跳过
+				for _, spentOut := range spentTXOs[txID] {
+					if spentOut == outIdx {
+						continue Outputs
+					}
+				}
+				outputs.Outputs = append(outputs.Outputs, out)
+			}
+			if len(outputs.Outputs) > 0 {
+				UTXO[txID] = outputs
+			}
+			if !tx.IsCoinbase() {
+				for _, vin := range tx.Vin {
+					inTxID := hex.EncodeToString(vin.Txid)
+					spentTXOs[inTxID] = append(spentTXOs[inTxID], vin.Vout)
 				}
 			}
 		}
+		if len(block.PrevBlockHash) == 0 {
+			break
+		}
 	}
-	return accumulated, unspentOutputs
+	return UTXO
 }
 
-// FindUTXO 获取地址全部UTXO，用于余额查询
-func (bc *Blockchain) FindUTXO(address string) []TXOutput {
+// FindUTXO 获取地址全部UTXO，用于余额查询（现在优先用UTXOSet.FindUTXO）
+func (bc *Blockchain) FindUTXO(pubKeyHash []byte) []TXOutput {
 	var UTXOs []TXOutput
-	unspentTransactions := bc.FindUnspentTransactions(address)
-	wallets, _ := LoadWallets()
-	wallet := wallets.GetWallet(address)
-	pubKeyHash := HashPubKey(wallet.PublicKey)
-
+	unspentTransactions := bc.FindUnspentTransactions(pubKeyHash)
 	for _, tx := range unspentTransactions {
 		for _, out := range tx.Vout {
 			if out.IsLockedWithKey(pubKeyHash) {
@@ -848,7 +1074,10 @@ func (cli *CLI) Run() {
 }
 
 func (cli *CLI) createWallet() {
-	wallets, _ := LoadWallets()
+	wallets, err := LoadWallets()
+	if err != nil {
+		log.Panic(err)
+	}
 	address := wallets.CreateWallet()
 	wallets.SaveWallets()
 	fmt.Printf("Your new address: %s\n", address)
@@ -857,15 +1086,28 @@ func (cli *CLI) createWallet() {
 func (cli *CLI) createBlockchain(address string) {
 	bc := CreateBlockchain(address)
 	defer bc.db.Close()
+	utxoSet := UTXOSet{bc}
+	utxoSet.Reindex()
 	fmt.Println("Done!")
 }
 
 func (cli *CLI) getBalance(address string) {
 	bc := BlockchainInstance()
 	defer bc.db.Close()
+	utxoSet := UTXOSet{bc}
 
+	wallets, err := LoadWallets()
+	if err != nil {
+		log.Panic(err)
+	}
+	wallet := wallets.GetWallet(address)
+	if wallet == nil {
+		log.Panicf("ERROR: Address %s does not exist", address)
+	}
+	pubKeyHash := HashPubKey(wallet.GetPublicKey())
+
+	UTXOs := utxoSet.FindUTXO(pubKeyHash)
 	balance := 0
-	UTXOs := bc.FindUTXO(address)
 	for _, out := range UTXOs {
 		balance += out.Value
 	}
@@ -875,9 +1117,24 @@ func (cli *CLI) getBalance(address string) {
 func (cli *CLI) send(from, to string, amount int) {
 	bc := BlockchainInstance()
 	defer bc.db.Close()
+	utxoSet := UTXOSet{bc}
 
-	tx := NewUTXOTransaction(from, to, amount, bc)
-	bc.MineBlock([]*Transaction{tx})
+	wallets, err := LoadWallets()
+	if err != nil {
+		log.Panic(err)
+	}
+	wallet := wallets.GetWallet(from)
+	if wallet == nil {
+		log.Panicf("ERROR: from address %s not found", from)
+	}
+
+	// coinbase奖励交易 + 用户转账交易
+	cbTx := NewCoinbaseTX(from, "")
+	tx := NewUTXOTransaction(from, to, amount, &utxoSet)
+	txs := []*Transaction{cbTx, tx}
+
+	newBlock := bc.MineBlock(txs)
+	utxoSet.Update(newBlock)
 	fmt.Println("Success!")
 }
 
@@ -903,7 +1160,7 @@ func (cli *CLI) printChain() {
 }
 
 func main() {
-	gob.Register(ecdsa.PrivateKey{})
+	gob.Register(Wallet{})
 	cli := CLI{}
 	cli.Run()
 }

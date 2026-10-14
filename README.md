@@ -102,3 +102,35 @@ go run main.go getbalance -address 1NE86r4Esjf53EL7fR86CsfTZpNN42Sfab
 Balance of '1NE86r4Esjf53EL7fR86CsfTZpNN42Sfab': 6
 
 ```
+```markdown
+# blockchain_go Part6
+基于Jeiwan区块链教程 Part6，单文件Go实现：UTXO缓存集 + Merkle Tree + P2PKH
+
+## 功能
+1. Coinbase挖矿奖励交易
+2. UTXO Set 缓存（bbolt独立bucket，避免每次查询全链遍历）
+3. Merkle Tree，区块头存储Merkle根，支持SPV基础
+4. P2PKH 地址、钱包、ECDSA签名、交易验证
+
+## 命令
+# 创建钱包
+
+go run main.go createwallet
+
+# 创建区块链（创世块）
+```bash
+go run main.go createblockchain -address 你的地址
+```
+# 转账（自带 coinbase 挖矿奖励）
+```bash
+go run main.go send -from 源地址 -to 目标地址 -amount 数量
+```
+# 查询余额
+```bash
+go run main.go getbalance -address 地址
+```
+# 打印整条链
+```bash
+go run main.go printchain
+```
+```
