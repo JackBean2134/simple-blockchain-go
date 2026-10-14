@@ -1,138 +1,104 @@
-📖 项目简介
-本项目是一个教学用途的简易区块链实现，参考比特币核心原理，采用 UTXO（未花费交易输出）模型，不使用传统账户余额体系，币存储在交易输出（TXOutput）中。
-核心特性：
-✅ PoW 工作量证明：挖矿机制，计算哈希满足难度条件，保证区块不可篡改
-✅ Coinbase 挖矿交易：创世区块内置 Coinbase 交易，无输入，凭空产生挖矿奖励
-✅ UTXO 交易模型：TXInput（交易输入）引用历史未花费输出；TXOutput（交易输出）保存代币 + 锁定脚本
-✅ 持久化存储：使用 bbolt（嵌入式 KV 数据库）保存区块数据，程序重启数据不丢失
-✅ 命令行 CLI 工具：创建链、转账、查询余额、打印整条区块链
-✅ 交易锁定 / 解锁脚本（简化版）：ScriptPubKey（输出锁定）、ScriptSig（输入解锁），使用地址字符串校验，未引入公私钥签名
-⚠️ 项目为教学简化版本，不具备生产安全性：无真实非对称加密签名、无 P2P 网络、无默克尔树完整实现、无交易池。
-📦 环境依赖
-Go 1.18+
-bbolt 嵌入式数据库
-bash
-# 安装依赖
+# Go 简易区块链（Part5：钱包、ECDSA签名、比特币地址）
+参考原文：https://learnblockchain.cn/article/637
+> 在之前UTXO模型基础上升级：实现钱包、椭圆曲线ECDSA公私钥、Base58比特币地址、交易数字签名与交易合法性校验。
+> 项目复现比特币身份体系：私钥拥有资产控制权，交易必须签名，节点验证签名后交易才能上链。
+
+## ✨ 新增功能（对比上一版）
+1. **钱包Wallet**：生成ECDSA公私钥对，支持创建多钱包，持久化保存到wallets.dat
+2. **真实比特币地址算法**
+   - 公钥哈希：`RIPEMD160(SHA256(PubKey))`
+   - Base58编码（剔除容易混淆字符：0,O,I,l,+,/）
+   - 版本前缀 + 公钥哈希 + 4字节校验和
+3. **交易数字签名 ECDSA**
+   - Coinbase交易无需签名
+   - 普通转账使用私钥对修剪后的交易副本签名
+   - 挖矿打包区块前校验所有交易签名，非法交易直接拒绝
+4. 交易结构改造：移除ScriptPubKey/ScriptSig，替换为PubKeyHash、Signature、PubKey字段
+
+> ⚠️ 教学简化项目，单机运行，无P2P网络。
+
+## 📦 环境依赖
+```bash
 go get go.etcd.io/bbolt
-📁 项目结构
-plaintext
-blockchain-go/
-├── main.go          # 全部代码：区块、交易、UTXO、PoW、CLI命令
-├── blockchain.db    # bbolt数据库文件（运行后自动生成）
-└── README.md        # 项目说明文档
-🧩 核心数据结构说明
-1. 交易输出 TXOutput
-   代币存储载体，带有锁定脚本ScriptPubKey，规定谁可以花费这笔币。
-   go
-   运行
-   type TXOutput struct {
-   Value        int      // 金额
-   ScriptPubKey string   // 锁定脚本（本项目简化为地址字符串）
-   }
-2. 交易输入 TXInput
-   消费旧交易输出，引用之前交易的输出，附带解锁脚本ScriptSig。
-   go
-   运行
-   type TXInput struct {
-   Txid      []byte   // 引用的旧交易ID
-   Vout      int      // 旧交易输出索引
-   ScriptSig string   // 解锁脚本（简化为地址字符串）
-   }
-3. 交易 Transaction
-   一笔交易包含多个输入与输出。
-   Coinbase 交易：挖矿奖励交易，没有真实输入，Txid=[]byte{}, Vout=-1
-   go
-   运行
-   type Transaction struct {
-   ID   []byte       // 交易哈希ID
-   Vin  []TXInput    // 交易输入数组
-   Vout []TXOutput   // 交易输出数组
-   }
-4. 区块 Block
-   区块不再存储简单字符串 Data，而是存储一组交易。
-   go
-   运行
-   type Block struct {
-   Timestamp     int64          // 区块时间戳
-   Transactions  []*Transaction // 区块内所有交易
-   PrevBlockHash []byte         // 上一个区块哈希
-   Hash          []byte         // 当前区块哈希
-   Nonce         int            // PoW随机数
-   }
-   🚀 使用教程
-   每次重新创建区块链前，必须删除旧数据库文件，否则会提示区块链已存在
-   bash
-# 删除旧数据库（PowerShell）
-Remove-Item blockchain.db -Force
-
+go get golang.org/x/crypto/ripemd160
+```
+## 🚀 使用命令
+重置项目：删除旧数据库与钱包文件
+```powershell
+# Windows
+Remove-Item blockchain.db,wallets.dat -Force
 # Linux/Mac
-rm blockchain.db
-1. 创建区块链（生成创世区块 + Coinbase 挖矿奖励）
-   将挖矿奖励 50 个币发放给地址 Ivan
-   bash
-   go run main.go createblockchain -address Ivan
-2. 查询地址余额
-   遍历区块链，查找该地址全部 UTXO，统计余额
-   bash
-   go run main.go getbalance -address Ivan
-3. 转账交易
-   Ivan 向 Tom 转账 10 个币，自动生成找零输出，打包进新区块并挖矿
-   bash
-   go run main.go send -from Ivan -to Tom -amount 10
-4. 打印整条区块链
-   遍历输出所有区块、交易、输入输出、PoW 有效性
-   bash
-   go run main.go printchain
-   💡 核心原理介绍
-1. Coinbase 交易（创币交易）
-   仅出现在新区块，矿工挖矿奖励
-   唯一没有引用之前交易输出的交易
-   创世区块的第一笔交易就是 Coinbase，实现 “凭空发行代币”
-2. UTXO 模型
-   区块链没有账户，不存在 “账户余额” 字段。
-   UTXO：Unspent Transaction Output，未花费的交易输出
-   币保存在 TXOutput 中；当 TXOutput 被 TXInput 引用，标记为已花费，不能再次使用
-   查询余额：遍历整条链，找到地址可解锁的所有未花费输出，累加金额
-   转账：收集足够金额的 UTXO 作为输入，生成新的输出（转账金额 + 找零）
-3. PoW 工作量证明
-   不断改变 nonce 随机数，计算区块头哈希
-   哈希值必须小于目标阈值（targetBits 控制难度）
-   找到符合条件 nonce 即为挖矿成功，生成新区块
-   验证区块：重新运行 PoW，校验哈希是否合法，保证区块数据不可篡改
-4. 交易锁定 / 解锁（简化脚本）
-   TXOutput.ScriptPubKey：锁定脚本，代表这笔币属于哪个地址
-   TXInput.ScriptSig：解锁脚本，证明当前用户有权花费输出
-   简化实现：直接对比地址字符串；真实比特币采用公钥 + ECDSA 数字签名
-   📌 实验结果示例
-   plaintext
-# 创建链
-go run main.go createblockchain -address Ivan
-Mining a new block
-00000052342345124...
+rm blockchain.db wallets.dat
+```
+```bash
+# 1. 创建钱包，生成比特币风格地址
+go run main.go createwallet
 
-Blockchain created!
+# 2. 创建区块链，创世块奖励发给某个地址
+go run main.go createblockchain -address 13Uu7B1vDP4ViXqHFsWtbraM3EfQ3UkWXt
 
-# 查询余额
-go run main.go getbalance -address Ivan
-Balance of 'Ivan': 50
+# 3. 查询地址余额
+go run main.go getbalance -address 13Uu7B1vDP4ViXqHFsWtbraM3EfQ3UkWXt
 
-# 转账
-go run main.go send -from Ivan -to Tom -amount 10
-Mining a new block
-00000088acb...
-Send Success!
+# 4. 转账（必须使用本地钱包内存在的地址）
+go run main.go send -from 1AmVdDvvQ977oVCpUqz7zAPUEiXKrX5avR -to 1NE86r4Esjf53EL7fR86CsfTZpNN42Sfab -amount 6
 
-# 再次查询余额
-go run main.go getbalance -address Ivan
-Balance of 'Ivan': 40
+# 5. 打印整条区块链
+go run main.go printchain
+```
+## 🧩 核心概念
+### 1、ECDSA 椭圆曲线加密
+私钥随机生成；公钥由私钥推导。私钥代表资产所有权，只有私钥持有者才能签名交易，花费 UTXO。公钥可以公开。
+#### 2、比特币地址生成流程
+原始公钥 → SHA256 → RIPEMD160 → 添加版本字节 → 双重 SHA256 取前 4 字节作为校验和 → Base58 编码 → 最终地址。
+地址是公钥的人类可读编码，地址公开，但无法反向推导出私钥。
+### 3、交易签名机制
+签名对象不是完整交易，而是修剪后的交易副本（清空输入的 Signature、PubKey）
+签名使用私钥；验证使用公钥
+挖矿前自动校验签名，签名不合法交易直接报错，无法打包上链
+### 4、UTXO
+资产存储在 TXOutput 输出。输出被公钥哈希锁定；转账时，使用钱包私钥签名，解锁旧 UTXO，生成新输出（转账 + 找零）。
 
-go run main.go getbalance -address Tom
-Balance of 'Tom': 10
-📝 项目不足与后续改进方向
-当前脚本仅字符串比对，未实现公私钥、数字签名，任何人都可以随便花费地址资产
-无 P2P 网络，仅单机本地区块链，没有节点同步
-交易池未实现，交易必须立刻打包挖矿
-默克尔树简化，仅交易哈希拼接，没有完整 Merkle Tree 支持 SPV 简易支付验证
-无区块持久化校验、无交易合法性更多校验（重复花费防护可进一步强化）
-📄 许可证
-本项目仅用于课程学习与实验，仅供教学参考。
+## 📁 项目文件
+```plaintext
+blockchain/
+├── main.go        # 全部源码
+├── blockchain.db  # bbolt区块数据库
+├── wallets.dat    # 钱包文件，保存公私钥
+└── README.md
+
+```
+##  📌 项目局限
+1、单机程序，无 P2P 网络节点广播
+2、没有交易池，交易直接打包挖矿
+3、钱包文件简单 gob 序列化，缺少加密保护
+4、未实现完整比特币脚本系统
+
+## License
+仅供课程学习实验，禁止生产使用
+```plaintext
+
+## 运行示例
+```powershell
+Remove-Item blockchain.db,wallets.dat -Force
+
+go run main.go createwallet
+Your new address: 1AmVdDvvQ977oVCpUqz7zAPUEiXKrX5avR
+
+go run main.go createblockchain -address 1AmVdDvvQ977oVCpUqz7zAPUEiXKrX5avR
+Mining the block containing "Reward to '1AmVdDvvQ977oVCpUqz7zAPUEiXKrX5avR'"
+000000122348da06c19e5c513710340f4c307d884385da948a205655c6a9d008
+Done!
+
+go run main.go send -from 1AmVdDvvQ977oVCpUqz7zAPUEiXKrX5avR -to 1NE86r4Esjf53EL7fR86CsfTZpNN42Sfab -amount 6
+Mining the block containing "Reward to '1AmVdDvvQ977oVCpUqz7zAPUEiXKrX5avR'"
+0000000f3dbb0ab6d56c4e4b9f7479afe8d5a5dad4d2a8823345a1a16cf3347b
+Success!
+
+go run main.go getbalance -address 1AmVdDvvQ977oVCpUqz7zAPUEiXKrX5avR
+Balance of '1AmVdDvvQ977oVCpUqz7zAPUEiXKrX5avR': 4
+
+go run main.go getbalance -address 1NE86r4Esjf53EL7fR86CsfTZpNN42Sfab
+Balance of '1NE86r4Esjf53EL7fR86CsfTZpNN42Sfab': 6
+
+```
