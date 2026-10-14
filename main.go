@@ -5,10 +5,12 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/gob"
+	"flag"
 	"fmt"
 	"log"
 	"math"
 	"math/big"
+	"os"
 	"strconv"
 	"time"
 
@@ -25,6 +27,81 @@ const (
 type ProofOfWork struct {
 	block  *Block
 	target *big.Int
+}
+
+func (cli *CLI) validateArgs() {
+	if len(os.Args) < 2 {
+		cli.printUsage()
+		os.Exit(1)
+	}
+}
+
+func (cli *CLI) printUsage() {
+	fmt.Println("Usage:")
+	fmt.Println("  addblock -data BLOCK_DATA - add a block to the blockchain")
+	fmt.Println("  printchain - print all the blocks of the blockchain")
+}
+
+type CLI struct {
+	bc *Blockchain
+}
+
+func (cli *CLI) Run() {
+	cli.validateArgs()
+
+	addBlockCmd := flag.NewFlagSet("addblock", flag.ExitOnError)
+	printChainCmd := flag.NewFlagSet("printchain", flag.ExitOnError)
+
+	addBlockData := addBlockCmd.String("data", "", "Block data")
+	var err error
+	switch os.Args[1] {
+	case "addblock":
+		err = addBlockCmd.Parse(os.Args[2:])
+	case "printchain":
+		err = printChainCmd.Parse(os.Args[2:])
+	default:
+		cli.printUsage()
+		os.Exit(1)
+	}
+	if err != nil {
+		log.Panic(err)
+	}
+
+	if addBlockCmd.Parsed() {
+		if *addBlockData == "" {
+			addBlockCmd.Usage()
+			os.Exit(1)
+		}
+		cli.addBlock(*addBlockData)
+	}
+
+	if printChainCmd.Parsed() {
+		cli.printChain()
+	}
+}
+
+func (cli *CLI) addBlock(data string) {
+	cli.bc.AddBlock(data)
+	fmt.Println("Success!")
+}
+
+func (cli *CLI) printChain() {
+	bci := cli.bc.Iterator()
+
+	for {
+		block := bci.Next()
+
+		fmt.Printf("Prev. hash: %x\n", block.PrevBlockHash)
+		fmt.Printf("Data: %s\n", block.Data)
+		fmt.Printf("Hash: %x\n", block.Hash)
+		pow := NewProofOfWork(block)
+		fmt.Printf("PoW: %s\n", strconv.FormatBool(pow.Validate()))
+		fmt.Println()
+
+		if len(block.PrevBlockHash) == 0 {
+			break
+		}
+	}
 }
 
 func NewProofOfWork(b *Block) *ProofOfWork {
@@ -267,26 +344,30 @@ func DeserializeBlock(data []byte) *Block {
 
 func main() {
 	bc := NewBlockchain()
+	defer bc.db.Close()
 
-	bc.AddBlock("Send 1 BTC to Ivan")
-	bc.AddBlock("Send 2 more BTC to Ivan")
+	cli := CLI{bc}
+	cli.Run()
 
-	// 使用迭代器遍历链（不再用bc.Blocks）
-	iter := bc.Iterator()
-	for {
-		block := iter.Next()
-
-		fmt.Printf("Previous hash: %x\n", block.PrevBlockHash)
-		fmt.Printf("Data: %s\n", block.Data)
-		fmt.Printf("Hash: %x\n", block.Hash)
-
-		pow := NewProofOfWork(block)
-		fmt.Printf("PoW校验结果: %s\n", strconv.FormatBool(pow.Validate()))
-		fmt.Println()
-
-		if len(block.PrevBlockHash) == 0 {
-			break
-		}
-	}
+	//bc.AddBlock("Send 1 BTC to Ivan")
+	//bc.AddBlock("Send 2 more BTC to Ivan")
+	//
+	//// 使用迭代器遍历链（不再用bc.Blocks）
+	//iter := bc.Iterator()
+	//for {
+	//	block := iter.Next()
+	//
+	//	fmt.Printf("Previous hash: %x\n", block.PrevBlockHash)
+	//	fmt.Printf("Data: %s\n", block.Data)
+	//	fmt.Printf("Hash: %x\n", block.Hash)
+	//
+	//	pow := NewProofOfWork(block)
+	//	fmt.Printf("PoW校验结果: %s\n", strconv.FormatBool(pow.Validate()))
+	//	fmt.Println()
+	//
+	//	if len(block.PrevBlockHash) == 0 {
+	//		break
+	//	}
+	//}
 
 }
