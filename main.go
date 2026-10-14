@@ -24,6 +24,100 @@ const (
 	blocksBucket = "blocks"
 )
 
+/* ============ 【暂时注释未完成UTXO代码，避免编译报错，后续再写】
+type TXOutput struct {
+	Value        int
+	ScriptPubKey string
+}
+
+type TXInput struct {
+	Txid      []byte
+	Vout      int
+	ScriptSig string
+}
+
+type Transaction struct {
+	ID   []byte
+	Vin  []TXInput
+	Vout []TXOutput
+}
+
+func (bc *Blockchain) FindSpendableOutputs(address string, amount int) (int, map[string][]int) {
+	unspentOutputs := make(map[string][]int)
+	unspentTXs := bc.FindUnspentTransactions(address)
+	accumulated := 0
+
+Work:
+	for _, tx := range unspentTXs {
+		txID := hex.EncodeToString(tx.ID)
+
+		for outIdx, out := range tx.Vout {
+			if out.CanBeUnlockedWith(address) && accumulated < amount {
+				accumulated += out.Value
+				unspentOutputs[txID] = append(unspentOutputs[txID], outIdx)
+
+				if accumulated >= amount {
+					break Work
+				}
+			}
+		}
+	}
+
+	return accumulated, unspentOutputs
+}
+
+func NewUTXOTransaction(from, to string, amount int, bc *Blockchain) *Transaction {
+	var inputs []TXInput
+	var outputs []TXOutput
+
+	acc, validOutputs := bc.FindSpendableOutputs(from, amount)
+
+	if acc < amount {
+		log.Panic("ERROR: Not enough funds")
+	}
+
+	// Build a list of inputs
+	for txid, outs := range validOutputs {
+		txID, err := hex.DecodeString(txid)
+		if err != nil {
+			log.Panic(err)
+		}
+
+		for _, out := range outs {
+			input := TXInput{txID, out, from}
+			inputs = append(inputs, input)
+		}
+	}
+
+	// Build a list of outputs
+	outputs = append(outputs, TXOutput{amount, to})
+	if acc > amount {
+		outputs = append(outputs, TXOutput{acc - amount, from}) // a change
+	}
+
+	tx := Transaction{nil, inputs, outputs}
+	tx.SetID()
+
+	return &tx
+}
+func (bc *Blockchain) MineBlock(transactions []*Transaction) {
+	newBlock := NewBlock(transactions, lastHash)
+}
+
+func (cli *CLI) send(from, to string, amount int) {
+	bc := NewBlockchain(from)
+	defer bc.db.Close()
+
+	tx := NewUTXOTransaction(from, to, amount, bc)
+	bc.MineBlock([]*Transaction{tx})
+	fmt.Println("Success!")
+}
+
+func (bc *Blockchain) FindUnspentTransactions(address string) interface{} {
+
+}
+============ UTXO END ============ */
+
 type ProofOfWork struct {
 	block  *Block
 	target *big.Int
@@ -38,8 +132,8 @@ func (cli *CLI) validateArgs() {
 
 func (cli *CLI) printUsage() {
 	fmt.Println("Usage:")
-	fmt.Println("  addblock -data BLOCK_DATA - add a block to the blockchain")
-	fmt.Println("  printchain - print all the blocks of the blockchain")
+	fmt.Println("  addblock -data BLOCK_DATA : add a block to the blockchain")
+	fmt.Println("  printchain : print all blocks of blockchain")
 }
 
 type CLI struct {
@@ -184,7 +278,6 @@ type BlockchainIterator struct {
 
 func (bc *Blockchain) Iterator() *BlockchainIterator {
 	bci := &BlockchainIterator{bc.tip, bc.db}
-
 	return bci
 }
 
@@ -195,7 +288,6 @@ func (i *BlockchainIterator) Next() *Block {
 		b := tx.Bucket([]byte(blocksBucket))
 		encodedBlock := b.Get(i.currentHash)
 		block = DeserializeBlock(encodedBlock)
-
 		return nil
 	})
 	if err != nil {
@@ -203,17 +295,8 @@ func (i *BlockchainIterator) Next() *Block {
 	}
 
 	i.currentHash = block.PrevBlockHash
-
 	return block
 }
-
-//func (block *Block) SetHash() {
-//	timestamp := []byte(strconv.FormatInt(block.Timestamp, 10))
-//	header := bytes.Join([][]byte{block.PrevBlockHash, block.Data, timestamp}, []byte{})
-//	hash := sha256.Sum256(header)
-//	block.Hash = hash[:]
-//
-//}
 
 // 创建简化区块
 func NewBlock(data string, prevBlockHash []byte) *Block {
@@ -226,10 +309,6 @@ func NewBlock(data string, prevBlockHash []byte) *Block {
 }
 
 // 添加区块
-/*更新 AddBlock 方法：现在向链中加入区块，
-就不是像之前向一个数组中加入一个元素那么简单了。
-从现在开始，我们会将区块存储在数据库里面
-*/
 func (bc *Blockchain) AddBlock(data string) {
 	var lastHash []byte
 
@@ -252,7 +331,6 @@ func (bc *Blockchain) AddBlock(data string) {
 		}
 		err = b.Put([]byte("l"), newBlock.Hash)
 		bc.tip = newBlock.Hash
-
 		return nil
 	})
 	if err != nil {
@@ -265,20 +343,6 @@ func NewGenesisBlock() *Block {
 	return NewBlock("Genesis Block", []byte{})
 }
 
-// 实现一个函数创建有创世块的区块链 持久化
-
-/*
-打开一个数据库文件
-检查文件里面是否已经存储了一个区块链
-如果已经存储了一个区块链：
-创建一个新的 Blockchain 实例
-设置 Blockchain 实例的 tip 为数据库中存储的最后一个块的哈希
-如果没有区块链：
-创建创世块
-存储到数据库
-将创世块哈希保存为最后一个块的哈希
-创建一个新的 Blockchain 实例，初始时 tip 指向创世块（tip 有尾部，尖端的意思，在这里 tip 存储的是最后一个块的哈希）
-*/
 func NewBlockchain() *Blockchain {
 	var tip []byte
 	db, err := bbolt.Open(dbFile, 0600, nil)
@@ -291,7 +355,7 @@ func NewBlockchain() *Blockchain {
 		if b == nil {
 			fmt.Println("No existing blockchain found. Creating genesis block...")
 			var err error
-			b, err = tx.CreateBucket([]byte(blocksBucket)) // 只用 = ，复用外层b，不是 :=
+			b, err = tx.CreateBucket([]byte(blocksBucket))
 			if err != nil {
 				return err
 			}
@@ -309,7 +373,6 @@ func NewBlockchain() *Blockchain {
 			// bucket存在，读取最后区块哈希
 			tip = b.Get([]byte("l"))
 		}
-
 		return nil
 	})
 	if err != nil {
@@ -348,26 +411,4 @@ func main() {
 
 	cli := CLI{bc}
 	cli.Run()
-
-	//bc.AddBlock("Send 1 BTC to Ivan")
-	//bc.AddBlock("Send 2 more BTC to Ivan")
-	//
-	//// 使用迭代器遍历链（不再用bc.Blocks）
-	//iter := bc.Iterator()
-	//for {
-	//	block := iter.Next()
-	//
-	//	fmt.Printf("Previous hash: %x\n", block.PrevBlockHash)
-	//	fmt.Printf("Data: %s\n", block.Data)
-	//	fmt.Printf("Hash: %x\n", block.Hash)
-	//
-	//	pow := NewProofOfWork(block)
-	//	fmt.Printf("PoW校验结果: %s\n", strconv.FormatBool(pow.Validate()))
-	//	fmt.Println()
-	//
-	//	if len(block.PrevBlockHash) == 0 {
-	//		break
-	//	}
-	//}
-
 }
