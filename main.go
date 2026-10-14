@@ -11,10 +11,16 @@ import (
 	"math/big"
 	"strconv"
 	"time"
+
+	"go.etcd.io/bbolt"
 )
 
 // 定义挖矿的难度值
-const targetBits = 24
+const (
+	targetBits   = 24
+	dbFile       = "blockchain.db"
+	blocksBucket = "blocks"
+)
 
 type ProofOfWork struct {
 	block  *Block
@@ -89,7 +95,39 @@ type Block struct {
 }
 
 type Blockchain struct {
-	Blocks []*Block
+	tip []byte
+	db  *bbolt.DB
+}
+
+// 区块链迭代器
+type BlockchainIterator struct {
+	currentHash []byte
+	db          *bbolt.DB
+}
+
+func (bc *Blockchain) Iterator() *BlockchainIterator {
+	bci := &BlockchainIterator{bc.tip, bc.db}
+
+	return bci
+}
+
+func (i *BlockchainIterator) Next() *Block {
+	var block *Block
+
+	err := i.db.View(func(tx *bbolt.Tx) error {
+		b := tx.Bucket([]byte(blocksBucket))
+		encodedBlock := b.Get(i.currentHash)
+		block = DeserializeBlock(encodedBlock)
+
+		return nil
+	})
+	if err != nil {
+		log.Panic(err)
+	}
+
+	i.currentHash = block.PrevBlockHash
+
+	return block
 }
 
 //func (block *Block) SetHash() {
@@ -111,10 +149,38 @@ func NewBlock(data string, prevBlockHash []byte) *Block {
 }
 
 // 添加区块
+/*更新 AddBlock 方法：现在向链中加入区块，
+就不是像之前向一个数组中加入一个元素那么简单了。
+从现在开始，我们会将区块存储在数据库里面
+*/
 func (bc *Blockchain) AddBlock(data string) {
-	prevBlock := bc.Blocks[len(bc.Blocks)-1]
-	block := NewBlock(data, prevBlock.Hash)
-	bc.Blocks = append(bc.Blocks, block)
+	var lastHash []byte
+
+	err := bc.db.View(func(tx *bbolt.Tx) error {
+		b := tx.Bucket([]byte(blocksBucket))
+		lastHash = b.Get([]byte("l"))
+		return nil
+	})
+	if err != nil {
+		log.Panic(err)
+	}
+
+	newBlock := NewBlock(data, lastHash)
+
+	err = bc.db.Update(func(tx *bbolt.Tx) error {
+		b := tx.Bucket([]byte(blocksBucket))
+		err1 := b.Put(newBlock.Hash, newBlock.Serialize())
+		if err1 != nil {
+			return err1
+		}
+		err = b.Put([]byte("l"), newBlock.Hash)
+		bc.tip = newBlock.Hash
+
+		return nil
+	})
+	if err != nil {
+		log.Panic(err)
+	}
 }
 
 // 创建创世块的方法
@@ -122,9 +188,58 @@ func NewGenesisBlock() *Block {
 	return NewBlock("Genesis Block", []byte{})
 }
 
-// 实现一个函数创建有创世块的区块链
+// 实现一个函数创建有创世块的区块链 持久化
+
+/*
+打开一个数据库文件
+检查文件里面是否已经存储了一个区块链
+如果已经存储了一个区块链：
+创建一个新的 Blockchain 实例
+设置 Blockchain 实例的 tip 为数据库中存储的最后一个块的哈希
+如果没有区块链：
+创建创世块
+存储到数据库
+将创世块哈希保存为最后一个块的哈希
+创建一个新的 Blockchain 实例，初始时 tip 指向创世块（tip 有尾部，尖端的意思，在这里 tip 存储的是最后一个块的哈希）
+*/
 func NewBlockchain() *Blockchain {
-	return &Blockchain{[]*Block{NewGenesisBlock()}}
+	var tip []byte
+	db, err := bbolt.Open(dbFile, 0600, nil)
+	if err != nil {
+		log.Panic(err)
+	}
+	err = db.Update(func(tx *bbolt.Tx) error {
+		b := tx.Bucket([]byte(blocksBucket))
+		//bucket 不存在，新建
+		if b == nil {
+			fmt.Println("No existing blockchain found. Creating genesis block...")
+			var err error
+			b, err = tx.CreateBucket([]byte(blocksBucket)) // 只用 = ，复用外层b，不是 :=
+			if err != nil {
+				return err
+			}
+			genesis := NewGenesisBlock()
+			err = b.Put(genesis.Hash, genesis.Serialize())
+			if err != nil {
+				return err
+			}
+			err = b.Put([]byte("l"), genesis.Hash)
+			if err != nil {
+				return err
+			}
+			tip = genesis.Hash
+		} else {
+			// bucket存在，读取最后区块哈希
+			tip = b.Get([]byte("l"))
+		}
+
+		return nil
+	})
+	if err != nil {
+		log.Panic(err)
+	}
+	bc := Blockchain{tip, db}
+	return &bc
 }
 
 // 实现Block的Serialize方法
@@ -156,14 +271,22 @@ func main() {
 	bc.AddBlock("Send 1 BTC to Ivan")
 	bc.AddBlock("Send 2 more BTC to Ivan")
 
-	for _, block := range bc.Blocks {
+	// 使用迭代器遍历链（不再用bc.Blocks）
+	iter := bc.Iterator()
+	for {
+		block := iter.Next()
+
 		fmt.Printf("Previous hash: %x\n", block.PrevBlockHash)
 		fmt.Printf("Data: %s\n", block.Data)
 		fmt.Printf("Hash: %x\n", block.Hash)
 
 		pow := NewProofOfWork(block)
-		fmt.Printf("PoW: %s\n", strconv.FormatBool(pow.Validate()))
+		fmt.Printf("PoW校验结果: %s\n", strconv.FormatBool(pow.Validate()))
 		fmt.Println()
+
+		if len(block.PrevBlockHash) == 0 {
+			break
+		}
 	}
 
 }
