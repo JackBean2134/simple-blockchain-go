@@ -4,7 +4,9 @@ package main
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/gob"
 	"fmt"
+	"log"
 	"math"
 	"math/big"
 	"strconv"
@@ -124,6 +126,30 @@ func NewGenesisBlock() *Block {
 func NewBlockchain() *Blockchain {
 	return &Blockchain{[]*Block{NewGenesisBlock()}}
 }
+
+// 实现Block的Serialize方法
+func (b *Block) Serialize() []byte {
+	var result bytes.Buffer
+	encoder := gob.NewEncoder(&result)
+
+	err := encoder.Encode(b)
+	if err != nil {
+		log.Panic(err)
+	}
+	return result.Bytes()
+}
+
+// 解序列化的函数
+func DeserializeBlock(data []byte) *Block {
+	var block Block
+	decoder := gob.NewDecoder(bytes.NewReader(data))
+	err := decoder.Decode(&block)
+	if err != nil {
+		log.Panic(err)
+	}
+	return &block
+}
+
 func main() {
 	bc := NewBlockchain()
 
