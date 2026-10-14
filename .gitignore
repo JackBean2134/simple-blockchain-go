@@ -20,3 +20,14 @@ env/
 
 # 日志
 *.log
+
+# bbolt数据库
+blockchain.db
+*.db
+
+# 编译产物
+*.exe
+*.out
+*.test
+
+
